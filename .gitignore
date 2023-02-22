@@ -92,3 +92,4 @@ ENV/
 .benchmarks
 .pytest_cache
 
+.gdb_history

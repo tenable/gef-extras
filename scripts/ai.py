@@ -22,9 +22,11 @@ if TYPE_CHECKING:
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-LAST_QUESTION = None
-LAST_ANSWER = None
+LAST_QUESTION = []
+LAST_ANSWER = []
 LAST_PC = None
+LAST_COMMAND = None
+HISTORY_LENGTH = 3
 
 
 def disable_color(t):
@@ -32,12 +34,18 @@ def disable_color(t):
     gef.config["gef.disable_color"] = t
     return
 
-def build_prompt(question):
+def build_prompt(question, command):
+    if command is not None:
+        return build_prompt_from_command(question, command)
+
     ## First, get the current GDB context
     ## Let's begin with the assembly near the current instruction
     color_on = gef.config["gef.disable_color"]
     #asm = gdb.execute("context code", to_string=True)
-    asm = gdb.execute("x/16i $pc", to_string=True)
+    try:
+        asm = gdb.execute("capstone-disassemble --length 32 $pc", to_string=True)
+    except:
+        asm = gdb.execute("x/16i $pc", to_string=True)
     ## Next, let's get the registers
     #regs = gdb.execute("context regs", to_string=True)
     regs = gdb.execute("info registers", to_string=True)
@@ -112,18 +120,28 @@ def build_prompt(question):
 {source}
 ```
 """
-   
-    ## If the context hasn't changed, include the last question and answer
-    ## (we could add more of these, but there are length limitations on prompts)
-    if LAST_QUESTION and LAST_ANSWER and LAST_PC == gdb.execute("info reg $pc", to_string=True):
-        prompt += f"""Question: {LAST_QUESTION}\n\nAnswer: {LAST_ANSWER}\n\n"""
+    return finish_prompt(prompt, question)
 
-    prompt += f"""Question: {question}
 
-Answer: """
+def build_prompt_from_command(question, command):
+    prompt = f"""Running the command `command` in the GDB debugger yields the following output:\n"""
+    output = gdb.execute(command, to_string=True)
+    gef_print(output)
+    prompt += f"""\n```\n{output}\n```\n"""
+    return finish_prompt(prompt, question)
 
+
+def strip_colors(text):
     ## Now remove all ANSI color codes from the prompt
-    prompt = re.sub(r"\x1b[^m]*m", "", prompt)
+    text = re.sub(r"\x1b[^m]*m", "", text)
+    return text
+
+
+def finish_prompt(prompt, question):
+    for (q,a) in zip(LAST_QUESTION, LAST_ANSWER):
+        prompt += f"""Question: {q}\n\nAnswer: {a}\n\n"""
+    prompt += f"""Question: {question}\n\nAnswer: """
+    prompt = strip_colors(prompt)
     return prompt
 
 
@@ -171,24 +189,43 @@ gef➤  ai how do you know this?
 
     @only_if_gdb_running
     def do_invoke(self, argv: List[str]):
-        global LAST_QUESTION, LAST_ANSWER, LAST_PC
+        global LAST_QUESTION, LAST_ANSWER, LAST_PC, LAST_COMMAND
         if not OPENAI_API_KEY:
             gef_print("Please set the OPENAI_API_KEY environment variable.")
             return
         parser = argparse.ArgumentParser(prog=self._cmdline_)
-        parser.add_argument("question", nargs="+", help="The question to ask.")
+        parser.add_argument("question", type=str, default=None, nargs="+", help="The question to ask.")
         parser.add_argument("-e", "--engine", default="text-davinci-003", help="The OpenAI engine to use.")
         parser.add_argument("-t", "--temperature", default=0.5, type=float, help="The temperature to use.")
         parser.add_argument("-m", "--max-tokens", default=100, type=int, help="The maximum number of tokens to generate.")
         parser.add_argument("-v", "--verbose", action="store_true", help="Print the prompt and response.")
+        parser.add_argument("-c", "--command", type=str, default=None, help="Run a command in the GDB debugger and ask a question about the output.")
         args = parser.parse_args(argv)
+       
+        if not args.question:
+            parser.print_help()
+            return
+        
         question = " ".join(args.question)
-        prompt = build_prompt(question)
-        LAST_QUESTION = question
-        LAST_PC = gdb.execute("info registers pc", to_string=True)
+        command = args.command
+        current_pc = gdb.execute("info reg $pc", to_string=True)
+        if current_pc == LAST_PC and command is None:
+            command = LAST_COMMAND
+        else:
+            LAST_COMMAND = command
+        if LAST_PC != current_pc or LAST_COMMAND != command:
+            LAST_QUESTION.clear()
+            LAST_ANSWER.clear()
+
+        prompt = build_prompt(question, command)
         if args.verbose:
             gef_print(f"Sending this prompt to OpenAI:\n\n{prompt}")
-        res = query_openai(prompt, engine=args.engine, max_tokens=args.max_tokens, temperature=args.temperature)
-        LAST_ANSWER = res
+        res = query_openai(prompt, engine=args.engine, max_tokens=args.max_tokens, temperature=args.temperature).strip()
+        LAST_QUESTION.append(question)
+        LAST_ANSWER.append(res)
+        LAST_PC = current_pc
+        if len(LAST_QUESTION) > HISTORY_LENGTH:
+            LAST_QUESTION.pop(0)
+            LAST_ANSWER.pop(0)
         gef_print(res)
         return

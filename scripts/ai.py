@@ -12,6 +12,7 @@ __LICENSE__ = "MIT"
 from typing import TYPE_CHECKING, List
 import openai
 import os
+import textwrap
 import json
 import argparse
 import gdb
@@ -227,5 +228,7 @@ gef➤  ai how do you know this?
         if len(LAST_QUESTION) > HISTORY_LENGTH:
             LAST_QUESTION.pop(0)
             LAST_ANSWER.pop(0)
-        gef_print(res)
+        term_width = os.get_terminal_size().columns
+        answer = textwrap.fill(res, term_width)
+        gef_print(answer)
         return
